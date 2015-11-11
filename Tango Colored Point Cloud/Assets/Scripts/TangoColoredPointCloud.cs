@@ -7,20 +7,20 @@ using Tango;
 /// <summary>
 /// Point cloud visualize using depth frame API.
 /// </summary>
-public class ColoredPointCloud : MonoBehaviour, ITangoDepth
+public class TangoColoredPointCloud : MonoBehaviour, ITangoDepth
 {
+	/// <summary>
+	/// Render Camera to retrieve Video Overlay RGB Texture
+	/// </summary>
 	public Camera ARcam;
-	
+	private int rgb_width;
+	private int rgb_height; 
+
 	/// <summary>
 	/// If set, the point cloud's mesh gets updated (much slower, useful for debugging).
 	/// </summary>
 	public bool m_updatePointsMesh;
-	int rgb_width = 1280;
-	int rgb_height = 720; 
-	
-	
-	private Texture2D tex;
-	
+
 	/// <summary>
 	/// If set, m_updatePointsMesh also gets set at start. Then PointCloud material's renderqueue is set to background
 	/// (which is same as YUV2RGB Shader) so that PointCloud data gets written to Z buffer for Depth test with virtual
@@ -34,21 +34,18 @@ public class ColoredPointCloud : MonoBehaviour, ITangoDepth
 	/// 
 	/// Note that not every member of this array will be filled out, see m_pointsCount.
 	/// </summary>
-	[HideInInspector]
-	public Vector3[] m_points;
-	public Color[] m_colors;
+	private Vector3[] m_points;
+	private Color[] m_colors;
 	
 	/// <summary>
 	/// The number of points in m_points.
 	/// </summary>
-	[HideInInspector]
-	public int m_pointsCount = 0;
+	private int m_pointsCount = 0;
 	
 	/// <summary>
 	/// Time between the last two depth events.
 	/// </summary>
-	[HideInInspector]
-	public float m_depthDeltaTime = 0.0f;
+	private float m_depthDeltaTime = 0.0f;
 	
 	/// <summary>
 	/// The maximum points displayed.  Just some const value.
@@ -89,13 +86,11 @@ public class ColoredPointCloud : MonoBehaviour, ITangoDepth
 	private bool m_isExtrinsicQuerable = false;
 	
 	private Renderer m_renderer;
-	private System.Random m_rand;
-	
-	
+
 	private int countFrame;
 	private int depthFrameRate;
 	
-	TangoCameraIntrinsics intrinsics;
+	private TangoCameraIntrinsics intrinsics;
 	
 	/// <summary>
 	/// Use this for initialization.
@@ -119,8 +114,7 @@ public class ColoredPointCloud : MonoBehaviour, ITangoDepth
 		m_mesh.Clear();
 		
 		m_renderer = GetComponent<Renderer>();
-		m_rand = new System.Random();
-		
+
 		if (m_enableOcclusion) 
 		{        
 			// Set the renderpass as background renderqueue's number minus one. YUV2RGB shader executes in 
@@ -139,6 +133,9 @@ public class ColoredPointCloud : MonoBehaviour, ITangoDepth
 		
 		depthFrameRate = 1;
 		countFrame = 0;
+
+		rgb_width = ARcam.targetTexture.width;
+		rgb_height = ARcam.targetTexture.height;
 	}
 	
 	/// <summary>
@@ -213,11 +210,9 @@ public class ColoredPointCloud : MonoBehaviour, ITangoDepth
 				Matrix4x4 unityWorldTDepthCamera = m_unityWorldTStartService * m_startServiceTDevice * Matrix4x4.Inverse(m_imuTDevice) * m_imuTDepthCamera;
 				transform.position = Vector3.zero;
 				transform.rotation = Quaternion.identity;
-				
-				// Converting points array to world space.
-				
-				
-				
+
+				// Converting depth point "depth world" to "unity world"
+				// and get the corresponding color
 				for (int i = 0; i < m_pointsCount; ++i)
 				{
 					float x = tangoDepth.m_points[(i * 3) + 0];
@@ -225,32 +220,8 @@ public class ColoredPointCloud : MonoBehaviour, ITangoDepth
 					float z = tangoDepth.m_points[(i * 3) + 2];
 					
 					Vector3 currentPoint = new Vector3(x,y,z);
-					m_points[i] = unityWorldTDepthCamera.MultiplyPoint(new Vector3(x, y, z));
-					
-					// Project point
-					Vector3 reprojectedP = projectDepthToColor(currentPoint);
-					int projectX; 
-					int projectY; 
-
-					if(reprojectedP.z != 0.0f)
-					{
-						projectX = (int) (reprojectedP.x / reprojectedP.z);
-						projectY = (int) (reprojectedP.y / reprojectedP.z);
-					}
-					else
-					{
-						projectX = (int) reprojectedP.x;
-						projectY = (int) reprojectedP.y;
-					}
-					int index = (rgb_height - projectY) * rgb_width + projectX;
-					if((index < rgb_width*rgb_height) && (index>0))
-					{
-						m_colors[i] = pix[index];
-					}
-					else
-					{
-						m_colors[i] = new Color(0.0f, 0.0f, 0.0f);
-					}
+					m_points[i] = unityWorldTDepthCamera.MultiplyPoint(currentPoint);
+					m_colors[i] = retrieveColorDepthPoint(pix, currentPoint);
 				}
 				
 				if (m_updatePointsMesh)
@@ -271,12 +242,13 @@ public class ColoredPointCloud : MonoBehaviour, ITangoDepth
 			
 		}
 	}
-	
+
+	// Read the ARcam Renderer and return the RGB video overlay texture
 	Color[] RTImage()
 	{
 		RenderTexture.active = ARcam.targetTexture;
-		Texture2D image = new Texture2D(ARcam.targetTexture.width, ARcam.targetTexture.height);
-		image.ReadPixels(new Rect(0, 0, ARcam.targetTexture.width, ARcam.targetTexture.height), 0, 0);
+		Texture2D image = new Texture2D(rgb_width, rgb_height);
+		image.ReadPixels(new Rect(0, 0, rgb_width, rgb_height), 0, 0);
 		image.Apply();
 		return image.GetPixels();
 	}
@@ -330,6 +302,31 @@ public class ColoredPointCloud : MonoBehaviour, ITangoDepth
 		
 		return new Vector3(px, py, pz);
 	}
+
+	// Project depth point on the rgb overlay texture and return the corresponding color
+	private Color retrieveColorDepthPoint(Color[] rgbOverlay, Vector3 depthPoint)
+	{
+		Vector3 reprojectedP = projectDepthToColor (depthPoint);
+		int projectX; 
+		int projectY; 
+		
+		if (reprojectedP.z != 0.0f) {
+			projectX = (int)(reprojectedP.x / reprojectedP.z);
+	 		projectY = (int)(reprojectedP.y / reprojectedP.z);
+		} else {
+			projectX = (int)reprojectedP.x;
+			projectY = (int)reprojectedP.y;
+		}
+		
+		int index = (rgb_height - projectY) * rgb_width + projectX;
+		if ((index < rgb_width * rgb_height) && (index > 0)) {
+			return rgbOverlay [index];
+		} else {
+			return new Color (0.0f, 0.0f, 0.0f);
+		}
+	}
+
+
 	
 	private void _SetUpExtrinsics()
 	{
